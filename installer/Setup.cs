@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
@@ -84,25 +85,80 @@ internal static class Setup
             source.CopyTo(destination);
     }
 
-    private static bool IsDiscordRunning(DiscordTarget target)
+    private static string FindExecutable(DiscordTarget target, string resources)
     {
         var names = target.ProcessName == null ? DiscordExecutables : new[] { target.ProcessName };
-        foreach (string name in names)
-        {
-            Process[] processes = Process.GetProcessesByName(name);
-            foreach (Process process in processes) process.Dispose();
-            if (processes.Length > 0) return true;
-        }
-        return false;
+        string appFolder = Path.GetDirectoryName(resources);
+        return names.Select(name => Path.Combine(appFolder, name + ".exe")).FirstOrDefault(File.Exists);
     }
 
-    internal static void Install(DiscordTarget target, string data, string legacyData, IProgress<int> progress)
+    private static void CloseDiscord(DiscordTarget target, string executable)
+    {
+        string folder = Path.GetFullPath(target.Folder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        string name = Path.GetFileNameWithoutExtension(executable);
+        int session;
+        using (var current = Process.GetCurrentProcess()) session = current.SessionId;
+        var processes = Process.GetProcessesByName(name);
+        try
+        {
+            var matching = processes.Where(process =>
+            {
+                try
+                {
+                    if (process.HasExited || process.SessionId != session) return false;
+                    string path = process.MainModule.FileName;
+                    string appFolder = Path.GetDirectoryName(path);
+                    return string.Equals(Path.GetDirectoryName(appFolder) + Path.DirectorySeparatorChar, folder,
+                        StringComparison.OrdinalIgnoreCase)
+                        && Path.GetFileName(appFolder).StartsWith("app-", StringComparison.OrdinalIgnoreCase);
+                }
+                catch (InvalidOperationException) { return false; }
+                catch (Win32Exception)
+                {
+                    if (process.HasExited) return false;
+                    throw;
+                }
+            }).ToArray();
+
+            foreach (var process in matching)
+            {
+                try
+                {
+                    if (process.HasExited) continue;
+                    if (process.CloseMainWindow() && process.WaitForExit(3000)) continue;
+                    if (!process.HasExited) process.Kill();
+                    if (!process.WaitForExit(5000))
+                        throw new TimeoutException("Discord не завершил работу. Закройте его и повторите попытку.");
+                }
+                catch (InvalidOperationException) { if (!process.HasExited) throw; }
+                catch (Win32Exception) { if (!process.HasExited) throw; }
+            }
+        }
+        finally
+        {
+            foreach (var process in processes) process.Dispose();
+        }
+    }
+
+    internal static void LaunchDiscord(string executable)
+    {
+        using (var process = Process.Start(new ProcessStartInfo(executable) {
+            WorkingDirectory = Path.GetDirectoryName(executable),
+            UseShellExecute = true
+        }))
+        {
+            if (process == null) throw new InvalidOperationException("Не удалось запустить Discord.");
+        }
+    }
+
+    internal static string Install(DiscordTarget target, string data, string legacyData, IProgress<int> progress)
     {
         string resources = FindResources(target.Folder);
         if (resources == null || !File.Exists(Path.Combine(resources, "app.asar")))
             throw new InvalidOperationException("В выбранной папке не найдена установка Discord.");
-        if (IsDiscordRunning(target))
-            throw new InvalidOperationException("Полностью закройте выбранный Discord, включая значок в трее, и повторите попытку.");
+        string executable = FindExecutable(target, resources);
+        if (executable == null)
+            throw new InvalidOperationException("В выбранной папке не найден исполняемый файл Discord.");
 
         Directory.CreateDirectory(data);
         using (var installLock = new FileStream(Path.Combine(data, "install.lock"), FileMode.OpenOrCreate,
@@ -133,6 +189,7 @@ internal static class Setup
                 string current = Path.Combine(version, ".vencord-ru", "current");
                 if (!File.Exists(Path.Combine(current, "dist", "patcher.js")))
                     throw new InvalidOperationException("Не удалось найти файлы сборки Vencord RU.");
+                CloseDiscord(target, executable);
                 InstallLauncher(helper, target.Folder, data, bundleId, temporary);
                 progress.Report(100);
             }
@@ -143,6 +200,7 @@ internal static class Setup
                 catch (UnauthorizedAccessException) { }
             }
         }
+        return executable;
     }
 
     private static void MigrateUserPlugins(string data, string legacyData)
@@ -248,6 +306,9 @@ internal sealed class SetupWindow : Form
     internal SetupWindow()
     {
         Text = "Установка Vencord RU";
+        var windowIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+        Icon = windowIcon;
+        Disposed += (sender, args) => { if (windowIcon != null) windowIcon.Dispose(); };
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -271,7 +332,7 @@ internal sealed class SetupWindow : Form
             Bounds = new Rectangle(75, 17, 433, 40)
         };
         var hint = new Label {
-            Text = "Выберите Discord для установки Vencord RU. Перед установкой полностью закройте Discord.",
+            Text = "Выбранный Discord закроется перед установкой и откроется после неё.",
             Bounds = new Rectangle(22, 67, 486, 40),
             ForeColor = SetupTheme.Muted
         };
@@ -357,7 +418,8 @@ internal sealed class SetupWindow : Form
 
     private void DrawDiscordTarget(object sender, DrawItemEventArgs e)
     {
-        bool dropdownSelection = (e.State & (DrawItemState.Selected | DrawItemState.ComboBoxEdit)) == DrawItemState.Selected;
+        if ((e.State & DrawItemState.ComboBoxEdit) != 0) return;
+        bool dropdownSelection = (e.State & DrawItemState.Selected) != 0;
         using (var background = new SolidBrush(dropdownSelection ? Color.FromArgb(58, 60, 66) : SetupTheme.Field))
             e.Graphics.FillRectangle(background, e.Bounds);
 
@@ -375,6 +437,7 @@ internal sealed class SetupWindow : Form
         installing = true;
         targets.Enabled = browse.Enabled = close.Enabled = install.Enabled = false;
         status.Text = "Устанавливается Vencord RU…";
+        string executable;
         try
         {
             string discordData = Environment.GetEnvironmentVariable("DISCORD_USER_DATA_DIR");
@@ -388,7 +451,7 @@ internal sealed class SetupWindow : Form
             var progress = new Progress<int>(value => {
                 if (installing) installationProgress.SetProgress(value);
             });
-            await Task.Run(() => Setup.Install(target, data, legacyData, progress));
+            executable = await Task.Run(() => Setup.Install(target, data, legacyData, progress));
         }
         catch (Exception error)
         {
@@ -402,6 +465,16 @@ internal sealed class SetupWindow : Form
             installationProgress.Hide();
             targets.Show();
             targets.Enabled = browse.Enabled = close.Enabled = install.Enabled = true;
+        }
+        try
+        {
+            Setup.LaunchDiscord(executable);
+        }
+        catch (Exception error)
+        {
+            status.Text = "Vencord RU установлен. Откройте Discord вручную.";
+            SetupNotice.Show(this, "Vencord RU установлен", "Откройте Discord вручную. " + error.Message, warning: true);
+            return;
         }
         Close();
     }

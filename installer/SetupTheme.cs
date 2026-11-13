@@ -128,21 +128,82 @@ internal sealed class SetupProgress : Control
 
 internal sealed class SetupComboBox : ComboBox
 {
+    protected override void OnDropDown(EventArgs e)
+    {
+        base.OnDropDown(e);
+        Invalidate();
+    }
+
+    protected override void OnDropDownClosed(EventArgs e)
+    {
+        base.OnDropDownClosed(e);
+        Invalidate();
+    }
+
     protected override void WndProc(ref Message message)
     {
         const int Paint = 0x000f;
+        const int EraseBackground = 0x0014;
         const int Print = 0x0317;
         const int PrintClient = 0x0318;
-        base.WndProc(ref message);
+        if (message.Msg == EraseBackground)
+        {
+            message.Result = new IntPtr(1);
+            return;
+        }
+
         if (message.Msg == Paint && IsHandleCreated)
         {
-            using (var graphics = Graphics.FromHwnd(Handle)) DrawField(graphics);
+            IntPtr window = Handle;
+            PaintState paint;
+            IntPtr dc = BeginPaint(window, out paint);
+            try
+            {
+                if (dc != IntPtr.Zero && Width > 0 && Height > 0)
+                {
+                    using (var graphics = Graphics.FromHdc(dc))
+                    using (var buffer = BufferedGraphicsManager.Current.Allocate(graphics, ClientRectangle))
+                    {
+                        DrawField(buffer.Graphics);
+                        buffer.Render(graphics);
+                    }
+                }
+            }
+            finally
+            {
+                EndPaint(window, ref paint);
+            }
+            message.Result = IntPtr.Zero;
+            return;
         }
-        else if ((message.Msg == Print || message.Msg == PrintClient) && message.WParam != IntPtr.Zero)
+
+        if ((message.Msg == Print || message.Msg == PrintClient) && message.WParam != IntPtr.Zero)
         {
             using (var graphics = Graphics.FromHdc(message.WParam)) DrawField(graphics);
+            message.Result = IntPtr.Zero;
+            return;
         }
+
+        base.WndProc(ref message);
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PaintState
+    {
+        internal IntPtr DeviceContext;
+        internal int Erase;
+        internal Rectangle PaintRectangle;
+        internal int Restore;
+        internal int Update;
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+        internal byte[] Reserved;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr BeginPaint(IntPtr window, out PaintState paint);
+
+    [DllImport("user32.dll")]
+    private static extern bool EndPaint(IntPtr window, ref PaintState paint);
 
     private void DrawField(Graphics graphics)
     {

@@ -101,8 +101,35 @@ try {
     [IO.Compression.ZipFile]::CreateFromDirectory($payload, $zip)
     $candidate = Join-Path $stage 'Vencord-RU-Setup.exe'
     $logo = Join-Path $seed 'browser/icon.png'
+    $icon = Join-Path $stage 'Vencord.ico'
+    $png = [IO.File]::ReadAllBytes($logo)
+    if ($png.Length -lt 24) { throw 'The Vencord logo is incomplete.' }
+    $width = [int]$png[19]
+    $height = [int]$png[23]
+    if ($width -lt 1 -or $height -lt 1 -or
+        ($png[16..18] + $png[20..22] | Where-Object { $_ -ne 0 })) {
+        throw 'The Vencord logo must be a PNG smaller than 256 pixels on each side.'
+    }
+    # ICO directory with one PNG image.
+    $writer = [IO.BinaryWriter]::new([IO.File]::Create($icon))
+    try {
+        $writer.Write([uint16]0)
+        $writer.Write([uint16]1)
+        $writer.Write([uint16]1)
+        $writer.Write([byte]$width)
+        $writer.Write([byte]$height)
+        $writer.Write([uint16]0)
+        $writer.Write([uint16]1)
+        $writer.Write([uint16]32)
+        $writer.Write([uint32]$png.Length)
+        $writer.Write([uint32]22)
+        $writer.Write($png)
+    } finally {
+        $writer.Dispose()
+    }
     $compilerArgs = @(
         '/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/codepage:65001',
+        "/win32icon:$icon",
         '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.IO.Compression.FileSystem.dll',
         "/resource:$zip,Bundle", "/resource:$helper,VencordInstallerCli", "/resource:$id,BundleId", "/resource:$logo,VencordLogo",
         "/out:$candidate", (Join-Path $PSScriptRoot 'Setup.cs'), (Join-Path $PSScriptRoot 'SetupTheme.cs'),
