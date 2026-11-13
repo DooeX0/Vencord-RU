@@ -1,6 +1,6 @@
 # Vencord RU — русский интерфейс Vencord для Discord
 
-Vencord RU добавляет русский язык в интерфейс Vencord для настольного Discord на Windows.
+Vencord RU добавляет русский язык в интерфейс Vencord для Discord на Windows.
 
 ## Возможности
 
